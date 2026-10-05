@@ -1,0 +1,77 @@
+name: Run screen and publish
+
+# Xetra closes at 17:30 Frankfurt time: 15:30 UTC in summer (CEST), 16:30 UTC
+# in winter (CET). Cron here is UTC and does not observe daylight saving, so
+# 17:00 UTC is after the close in both halves of the year.
+on:
+  schedule:
+    - cron: "0 17 * * 1-5"
+  workflow_dispatch:        # lets you trigger a run by hand from the Actions tab
+  push:
+    branches: [main]
+    paths-ignore:
+      - "**.md"
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# A scheduled run and a manual one must not publish over each other.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Offline logic check
+        run: python test_germany.py
+
+      # Yahoo rate-limits by IP and shared runner addresses are already busy.
+      # main_de.py refuses to screen a partial universe rather than publishing
+      # a thin one, so a retry after a pause is the right recovery: the per-day
+      # cache in .de_cache keeps whatever arrived on the first attempt, and the
+      # second run only asks for the gaps.
+      - name: Screen
+        id: screen
+        continue-on-error: true
+        run: python main_de.py --all --dashboard ""
+
+      - name: Screen (retry after rate-limit pause)
+        if: steps.screen.outcome == 'failure'
+        run: |
+          echo "First attempt failed - most likely Yahoo throttling. Pausing."
+          sleep 180
+          python main_de.py --all --dashboard ""
+
+      - name: Build site
+        run: python build_site.py
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
