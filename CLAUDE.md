@@ -248,9 +248,20 @@ page's verdict equals the Python funnel at default thresholds.
 
 `.github/workflows/screen.yml` runs at 17:00 UTC on weekdays (after the Xetra
 close in both CET and CEST), builds `site/`, and deploys to GitHub Pages, with
-a retry after a pause for Yahoo throttling. **Not yet pushed or run in CI** —
-Yahoo answers GitHub runners (the UK build confirmed it); Deutsche Börse's
-workbook from a runner IP is unverified until the first run.
+a retry after a pause for Yahoo throttling.
+
+Live: https://shkon1215-netizen.github.io/germany-screener/. Unlisted -
+`noindex` plus a blanket `robots.txt` - but the repo itself is public, which
+free Pages requires. No screen output is committed.
+
+**Deutsche Börse and Yahoo both answer GitHub's runners** - confirmed on the
+first run, 2026-10-05: the workbook downloaded, 450 of 458 lines priced, no
+retry needed, and the funnel matched the local run line for line (175 / 85 /
+16). If the roster step ever fails in CI while working locally, suspect
+IP-based blocking of the runner range before a code change.
+
+A docs-only push does not trigger a run (`paths-ignore: **.md`); start one with
+`gh workflow run screen.yml`.
 
 ## Interpretation
 

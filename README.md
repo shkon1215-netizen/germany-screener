@@ -1,5 +1,8 @@
 # Germany (Deutsche Börse) Relative Valuation Screener
 
+**Live:** https://shkon1215-netizen.github.io/germany-screener/ · rebuilt each
+weekday after the Xetra close
+
 Finds German-listed stocks trading at a discount to their industry peers on
 P/E, P/B and EV/EBITDA — and, independently, stocks that are cheap in absolute
 terms, and stocks that are cheap against their own filed history. Each row also
