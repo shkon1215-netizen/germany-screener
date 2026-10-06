@@ -249,6 +249,107 @@ def check_statements() -> list[str]:
     return bad
 
 
+def check_split_basis() -> list[str]:
+    """A split or consolidation Yahoo has priced in but not yet restated.
+
+    Johnson Matthey (Aug 2026) is the shape: a 4-for-3 consolidation recorded
+    as 0.75, prices rescaled at once, the filing still on the old share count.
+    """
+    from providers_de import build_statement_record
+    import de_filters as F
+    bad = []
+    print("\n=== splits since the latest filing ===")
+
+    def ok(cond, label):
+        print(f"  {'OK  ' if cond else 'FAIL'} {label}")
+        if not cond:
+            bad.append(label)
+
+    years = pd.to_datetime(["2021-12-31", "2022-12-31", "2023-12-31",
+                            "2024-12-31", "2025-12-31"])
+
+    def stmt(rows):
+        df = pd.DataFrame({k: [np.nan] + list(v) for k, v in rows.items()}, index=years).T
+        return df[df.columns[::-1]]
+
+    def company(shares):
+        inc = stmt({"Total Revenue": (1000e6,) * 4, "Operating Income": (150e6,) * 4,
+                     "EBITDA": (200e6,) * 4,
+                     "Net Income Common Stockholders": (100e6,) * 4})
+        bs = stmt({"Common Stock Equity": (1000e6,) * 4, "Ordinary Shares Number": shares,
+                    "Total Debt": (300e6,) * 4, "Cash And Cash Equivalents": (100e6,) * 4})
+        return inc, bs
+
+    idx = pd.date_range("2020-01-01", "2026-10-02", freq="B")
+    # Price series as Yahoo serves it: adjusted for every split it recorded.
+    px = pd.Series(20.0, index=idx)
+    split_day = pd.Timestamp("2026-08-03")
+
+    def splits(ratio):
+        return pd.Series([ratio], index=[split_day])
+
+    # 1. Consolidation 4-for-3, filing NOT restated: 100m filed shares, 75m
+    #    today. Market cap = price x 75m. True P/B is 0.75 x the naive one.
+    inc, bs = company((100e6,) * 4)
+    rec = build_statement_record(inc, bs, px, None, "EUR", "EUR",
+                                 close_now=20.0, mcap_now=20.0 * 75e6,
+                                 splits=splits(0.75))
+    ok(rec["hist_note"] == "" and abs(rec["share_basis_g"] - 0.75) < 1e-9
+       and rec["hist_pbr"] == [1.5] * 4,
+       f"unrestated consolidation: history restated by 0.75 ({rec['hist_pbr']})")
+
+    # 2. Split 5-for-1, filing NOT restated: 20m filed, 100m today.
+    inc, bs = company((20e6,) * 4)
+    rec = build_statement_record(inc, bs, px, None, "EUR", "EUR",
+                                 close_now=20.0, mcap_now=20.0 * 100e6,
+                                 splits=splits(5.0))
+    ok(abs(rec["share_basis_g"] - 5.0) < 1e-9 and rec["hist_pbr"] == [2.0] * 4,
+       f"unrestated split: history restated by 5 ({rec['hist_pbr']})")
+
+    # 3. Split recorded AND restated: filed shares already 100m -> leave alone.
+    inc, bs = company((100e6,) * 4)
+    rec = build_statement_record(inc, bs, px, None, "EUR", "EUR",
+                                 close_now=20.0, mcap_now=20.0 * 100e6,
+                                 splits=splits(5.0))
+    ok(rec["share_basis_g"] == 1.0 and rec["hist_pbr"] == [2.0] * 4,
+       "split already restated by Yahoo: left alone")
+
+    # 4. Share count off 5x and nothing recorded to explain it: refuse.
+    inc, bs = company((20e6,) * 4)
+    rec = build_statement_record(inc, bs, px, None, "EUR", "EUR",
+                                 close_now=20.0, mcap_now=20.0 * 100e6, splits=None)
+    ok(rec["hist_note"] == "price/share basis mismatch" and rec["hist_pbr"] == [],
+       "unexplained share-count gap refused, not guessed")
+
+    # 5. .info per-share fields. Filed equity 1000m over 100m old shares; g=0.75.
+    df = pd.DataFrame([
+        # still on the OLD basis: bookValue = 1000m / 100m = 10
+        dict(share_basis_g=0.75, lf_equity=1000e6, lf_shares=100e6, book_value_ps=10.0,
+             trailing_eps=1.0, trailing_pe=20.0, price_to_book=2.0, div_yield=4.0),
+        # already on the NEW basis: bookValue = 1000m / 75m
+        dict(share_basis_g=0.75, lf_equity=1000e6, lf_shares=100e6, book_value_ps=1000e6 / 75e6,
+             trailing_eps=4 / 3, trailing_pe=15.0, price_to_book=1.5, div_yield=4.0),
+        # neither
+        dict(share_basis_g=0.75, lf_equity=1000e6, lf_shares=100e6, book_value_ps=30.0,
+             trailing_eps=1.0, trailing_pe=20.0, price_to_book=2.0, div_yield=4.0),
+        # no split: untouched
+        dict(share_basis_g=1.0, lf_equity=1000e6, lf_shares=100e6, book_value_ps=10.0,
+             trailing_eps=1.0, trailing_pe=20.0, price_to_book=2.0, div_yield=4.0),
+    ])
+    out, _ = F.restate_info_for_splits(df)
+    ok(abs(out.loc[0, "price_to_book"] - 1.5) < 1e-9 and abs(out.loc[0, "div_yield"] - 4 / 0.75) < 1e-9
+       and out.loc[0, "split_note"] == "info restated for split",
+       ".info on the old basis: P/B and yield restated")
+    ok(out.loc[1, "price_to_book"] == 1.5 and np.isnan(out.loc[1, "div_yield"]),
+       ".info on the new basis: per-share kept, unverifiable yield missing")
+    ok(np.isnan(out.loc[2, "price_to_book"]) and out.loc[2, "split_note"] == "info basis unclear",
+       ".info on neither basis: refused")
+    ok(out.loc[3, "price_to_book"] == 2.0 and out.loc[3, "div_yield"] == 4.0
+       and out.loc[3, "split_note"] == "",
+       "no split since the filing: untouched")
+    return bad
+
+
 def check_history_screen() -> list[str]:
     bad = []
     print("\n=== own-history screen ===")
@@ -348,6 +449,7 @@ def main() -> int:
 
     failures += check_statements()
     failures += check_history_screen()
+    failures += check_split_basis()
 
     print("\n=== passing ===")
     hits = res[res["passes_any"]][["symbol", "name", "industry", "trailing_pe",

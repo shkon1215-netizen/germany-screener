@@ -550,10 +550,35 @@ MINOR_CCY = {"GBp": ("GBP", 100.0), "GBX": ("GBP", 100.0),
 # alone. It cannot catch small consolidations; it catches the ones that would
 # otherwise manufacture a 30%+ "discount" out of a unit change.
 SHARE_BREAK_BAND = (0.67, 1.5)
-# Today's price x latest filed shares must land near today's market cap. If it
-# does not, the price series and the share count are on different bases and
-# every historical market value built from them is wrong by the same factor.
-NOW_BASIS_BAND = (0.6, 1.6)
+# Today's price x latest filed shares must land near today's market cap,
+# once any split or consolidation since the filing is allowed for. If it does
+# not, the price series and the share count are on different bases and every
+# historical market value built from them is wrong by the same factor.
+#
+# Measured 2026-10-06 on names with no split since their filing: UK 1st-99th
+# percentile 0.75-1.07 (max 1.12), Germany 0.91-1.10. Below 1 is shares issued
+# since the filing (IQE 0.73, Rockhopper 0.79), above it buybacks. The old
+# 0.6-1.6 admitted an unrestated 3:2 split (0.67) or 4:3 consolidation (1.33)
+# - a fake 25-33% move in every past valuation. 0.7-1.25 refuses both and
+# keeps every healthy name measured.
+NOW_BASIS_BAND = (0.7, 1.25)
+
+
+def _splits_after(splits, when) -> list:
+    """Split / consolidation ratios Yahoo recorded after `when`, oldest first.
+
+    Yahoo reports a consolidation as a ratio below one (Johnson Matthey's
+    4-for-3 in Aug 2026 is 0.75) and a demerger price adjustment the same way,
+    so the caller decides what a ratio means by whether it explains the share
+    count, never by its size alone.
+    """
+    if splits is None or len(splits) == 0:
+        return []
+    s = pd.to_numeric(splits, errors="coerce")
+    s.index = pd.to_datetime(s.index).tz_localize(None).normalize() \
+        if getattr(s.index, "tz", None) is not None else pd.to_datetime(s.index).normalize()
+    s = s[(s.index > when) & (s > 0) & (s != 1)].sort_index()
+    return [float(v) for v in s.tolist()]
 # A latest filing older than this is not the latest filing - Yahoo has missed
 # one. "Today" is then today's price over earnings from two years ago, while
 # yfinance's own twelve-month figure knows better: Craneware read 52.6x on
@@ -567,7 +592,7 @@ MAX_FILING_AGE_DAYS = 548
 # build_statement_record does not reach names already cached - bump this and
 # the next run refetches instead of serving numbers the new code would not
 # produce.
-STATEMENTS_CACHE_VERSION = 3
+STATEMENTS_CACHE_VERSION = 4
 
 
 def cagr(values: list) -> float:
@@ -627,7 +652,8 @@ def build_statement_record(inc: pd.DataFrame, bs: pd.DataFrame,
                            quote_ccy: str, fin_ccy: str,
                            close_now: float, mcap_now: float,
                            fin_years: int = 3, max_hist: int = 5,
-                           asof: str | pd.Timestamp | None = None) -> dict:
+                           asof: str | pd.Timestamp | None = None,
+                           splits: pd.Series | None = None) -> dict:
     """Everything the two statement-based features need, from raw frames.
 
     Pure: no network, so test_germany.py can exercise every trap offline. `px` is
@@ -726,13 +752,38 @@ def build_statement_record(inc: pd.DataFrame, bs: pd.DataFrame,
             rec["hist_note"] = "share-count break"
             break
 
-    # Guard 2: today's price x latest filed shares against today's market cap.
+    # Guard 2: today's price x latest filed shares against today's market cap,
+    # allowing for a split or consolidation Yahoo has not restated yet.
+    #
+    # Yahoo's price series is adjusted for every split it records; its filed
+    # share counts catch up later. Johnson Matthey consolidated 4-for-3 in Aug
+    # 2026: the prices were rescaled at once, the FY2026 filing still carried
+    # the old 167.9m shares against 125.9m today. The ratio here read 1.33,
+    # inside the old 0.6-1.6 band, so every past market value was a third too
+    # high and the history screen showed a ~20% discount to its own history
+    # that did not exist. A 3:2 split would do the same in the other
+    # direction. So, as the Japan build does: among "no change" and each
+    # suffix of the ratios recorded since the filing, take the one that
+    # explains today's count, restate every filed year by it, and refuse a gap
+    # nothing explains.
     s_lf = _num(rows["shares"].get(lf))
+    g = 1.0
     if "hist_note" not in rec and np.isfinite(s_lf) and s_lf > 0:
         mc = _num(mcap_now)
         ratio = (_num(close_now) * s_lf / mc) if mc else np.nan
-        if not (np.isfinite(ratio) and NOW_BASIS_BAND[0] <= ratio <= NOW_BASIS_BAND[1]):
+        rec["basis_ratio"] = ratio
+        if np.isfinite(ratio) and ratio > 0:
+            fs = _splits_after(splits, lf)
+            cands = [1.0] + [float(np.prod(fs[k:])) for k in range(len(fs))]
+            g = min(cands, key=lambda c: abs(np.log(ratio * c)))
+        if not (np.isfinite(ratio) and NOW_BASIS_BAND[0] <= ratio * g <= NOW_BASIS_BAND[1]):
             rec["hist_note"] = "price/share basis mismatch"
+            g = 1.0
+    # The factor the latest filing's per-share basis is off by: also what the
+    # screen uses to check Yahoo's .info per-share fields (see the filters).
+    rec["share_basis_g"] = g
+    rec["lf_shares"] = s_lf
+    shares = [s * g for s in shares]
 
     per, pbr, evx = [], [], []
     for d, sh in zip(hy, shares):
@@ -860,7 +911,8 @@ def fetch_statements(snap: pd.DataFrame, cfg: ScreenConfig,
         rec = build_statement_record(
             inc, bs, px, fxs.get((q_major, f)), r.get("currency"), f,
             _num(r.get("close_local")), _num(r.get("market_cap_local")),
-            asof=asof or None)
+            asof=asof or None,
+            splits=(h["Stock Splits"] if h is not None and "Stock Splits" in h else None))
         return t, _json_safe(rec)
 
     if todo:

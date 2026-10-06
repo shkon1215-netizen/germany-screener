@@ -249,6 +249,11 @@ def main() -> int:
     # 8. screen
     # With --skip-liquidity cfg.min_adv_usd is 0, so apply_gates leaves adv_usd
     # alone and the measured value still reaches the dashboard.
+    # .info per-share fields onto today's share basis where a split since
+    # the filing left them behind - see DF.restate_info_for_splits.
+    if "share_basis_g" in pre.columns:
+        pre, sstats = DF.restate_info_for_splits(pre)
+        ustats.update(sstats)
     res, stats = run_screen(pre, usd_per_eur, cfg)
     if res.empty:
         print("Nothing survived screening.")

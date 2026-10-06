@@ -308,6 +308,66 @@ def apply_absolute_screen(df: pd.DataFrame, cfg: K.ScreenConfig) -> tuple[pd.Dat
     return df, stats
 
 
+def restate_info_for_splits(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
+    """Yahoo's .info per-share fields on today's share basis, after a split.
+
+    The peer and absolute screens read P/E, P/B, EPS, book value and yield
+    straight from .info. Yahoo restates those for splits on its own schedule,
+    and not consistently: after Johnson Matthey's Aug 2026 4-for-3
+    consolidation its bookValue was already on today's 125.9m shares (16.01 =
+    FY2026 equity / 125.9m) while its filed statements were still on the old
+    167.9m; in the Japan build bookValue was restated while dividendRate was
+    not. So the basis is tested per row, never assumed either way.
+
+    `share_basis_g` comes from build_statement_record: the split / consolidation
+    factor since the latest filing that today's market cap demands (1 for
+    almost everyone). Where it is not 1, filed equity over (book value x filed
+    shares) says which basis .info is on: ~1 means the old one, ~g the new.
+
+      old basis   EPS, book value and yield divided by g; P/E and P/B
+                  multiplied by it. ROE, their ratio, does not move.
+      new basis   per-share fields are right; the dividend cannot be checked
+                  the same way (in Japan it lagged when book value did not),
+                  so the yield is left missing rather than trusted.
+      neither     P/E, P/B and yield missing - no basis to vouch for.
+
+    EV/EBITDA needs nothing: Yahoo builds EV from today's market cap.
+    """
+    df = df.copy()
+    g = pd.to_numeric(df.get("share_basis_g"), errors="coerce").fillna(1.0)
+    eq = pd.to_numeric(df.get("lf_equity"), errors="coerce")
+    sh = pd.to_numeric(df.get("lf_shares"), errors="coerce")
+    bv = pd.to_numeric(df.get("book_value_ps"), errors="coerce")
+    k = eq / (bv * sh)
+    moved = np.abs(np.log(g)) > 0.02
+    tol = np.log(1.25)
+    old = moved & (np.abs(np.log(k)) < tol)
+    new = moved & ~old & (np.abs(np.log(k / g)) < tol)
+    unclear = moved & ~old & ~new
+
+    for c, op in (("trailing_eps", "div"), ("book_value_ps", "div"), ("div_yield", "div"),
+                  ("trailing_pe", "mul"), ("price_to_book", "mul")):
+        if c in df.columns:
+            v = pd.to_numeric(df[c], errors="coerce")
+            df[c] = v.where(~old, v / g if op == "div" else v * g)
+    if "div_yield" in df.columns:
+        df.loc[new, "div_yield"] = np.nan
+    for c in ("trailing_pe", "price_to_book", "div_yield"):
+        if c in df.columns:
+            df.loc[unclear, c] = np.nan
+
+    df["split_note"] = np.select([old, new, unclear],
+                                 ["info restated for split", "yield unverified after split",
+                                  "info basis unclear"], default="")
+    stats = {"info_restated_for_split": int(old.sum()),
+             "info_yield_unverified": int(new.sum()),
+             "info_basis_unclear": int(unclear.sum())}
+    if moved.any():
+        log.info("split basis: %d .info rows restated, %d yields unverified, %d unclear",
+                 *stats.values())
+    return df, stats
+
+
 HIST_METRICS = (("per", "trailing_pe"), ("pbr", "price_to_book"),
                 ("evx", "ev_to_ebitda"))
 
@@ -443,7 +503,7 @@ def de_output_columns(cfg: K.ScreenConfig) -> list[str]:
                  f"{m}_peer_n", f"{m}_pct_rank"]
     # Own filed history: today's same-basis values, the median benchmark, the
     # discount to it, and each year's value for the tooltip.
-    cols += ["hist_years", "hist_note", "hist_earnings", "per_now", "pbr_now", "evx_now",
+    cols += ["hist_years", "hist_note", "hist_earnings", "share_basis_g", "split_note", "per_now", "pbr_now", "evx_now",
              "hist_n_valid", "hist_n_pass", "hist_avg_disc", "hist_passes"]
     for m in ("per", "pbr", "evx"):
         cols += [f"hist_{m}_med", f"hist_{m}_disc"]

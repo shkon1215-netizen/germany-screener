@@ -108,6 +108,18 @@ python main_de.py --both-lines        # keep Stamm AND Vorzug (double-counts)
     Pharmaceuticals two ways, Health Care two ways, Retail, Internet two ways.
     Unfolded, each spelling is its own thin cohort.
 
+14. **A split or consolidation since the latest filing is applied, not
+    ignored** (`share_basis_g`, `restate_info_for_splits`). Yahoo rescales
+    prices the day it records one and restates filed share counts later; in
+    between, every past market value is off by the ratio. The UK build hit it
+    first — Johnson Matthey's 4-for-3 showed a fake 20% discount to its own
+    P/B history — and the fix lives in the shared `build_statement_record`:
+    the recorded ratio that explains today's market cap is applied to every
+    filed year, and .info's per-share fields are tested for the same lag.
+    The basis band is 0.7–1.25, measured here at 0.91–1.10 for names with no
+    split. **No German name had split since its filing on 2026-10-06**, so the
+    change moved nothing — the 14 passes were identical before and after.
+
 ## Excluded by default, and why
 
 | class | rule | 2026-10-02 |
