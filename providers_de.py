@@ -103,6 +103,42 @@ def to_yahoo(symbol: str, venue: str = "XETRA") -> str:
     return f"{t}.F" if "XETRA" not in str(venue).upper() else f"{t}{YAHOO_SUFFIX}"
 
 
+_ISIN_RE = r"^[A-Z]{2}[A-Z0-9]{9}\d$"
+
+
+def sheet_table(raw: pd.DataFrame) -> tuple[pd.DataFrame | None, str]:
+    """The company table on one sheet of the listed-companies workbook.
+
+    Returns (table with one column per header name, "as at" date) or
+    (None, "") when the sheet has no ISIN header. Pure, so test_germany.py
+    can plant the layouts the exchange has actually shipped.
+
+    The header row is found by its ISIN cell, not assumed - the exchange moves
+    things. And only the FIRST column of each name is kept, blank headers
+    dropped: from the 2026-10-01 file the Prime Standard sheet carries a
+    second block to the right of the company table, headed DAX | MDAX | SDAX
+    | TecDAX, so "TecDAX" appeared twice. Selecting it returned a two-column
+    frame, `.str` raised, and every run from 2026-10-09 failed before a single
+    price was fetched. The company table is always the leftmost block.
+    """
+    hdr = raw.index[raw.iloc[:, 0].astype(str).str.strip().eq("ISIN")]
+    if hdr.empty:
+        return None, ""
+    asof = ""
+    for v in raw.iloc[:hdr[0], 0].dropna():          # the stamp sits above it
+        m = re.match(r"(\d{4}-\d{2}-\d{2})", str(v).strip())
+        if m:
+            asof = m.group(1)
+            break
+    t = raw.iloc[hdr[0] + 1:].copy()
+    names = pd.Index([str(c).strip() for c in raw.iloc[hdr[0]]])
+    t.columns = names
+    keep = ~names.duplicated() & ~names.isin(["", "nan", "None"])
+    t = t.loc[:, keep]
+    t = t[t["ISIN"].notna() & t["ISIN"].astype(str).str.strip().str.match(_ISIN_RE)]
+    return t, asof
+
+
 class XetraProvider:
     def __init__(self, cfg: ScreenConfig):
         self.cfg = cfg
@@ -164,20 +200,11 @@ class XetraProvider:
                 log.warning("  sheet %r missing from the workbook", sheet)
                 continue
             raw = pd.read_excel(book, sheet, header=None, dtype=str)
-            hdr = raw.index[raw.iloc[:, 0].astype(str).str.strip().eq("ISIN")]
-            if hdr.empty:
+            t, asof = sheet_table(raw)
+            if t is None:
                 log.warning("  no ISIN header on sheet %r", sheet)
                 continue
-            # The "as at" stamp sits in column 0 above the header.
-            if not self.roster_asof:
-                for v in raw.iloc[:hdr[0], 0].dropna():
-                    m = re.match(r"(\d{4}-\d{2}-\d{2})", str(v).strip())
-                    if m:
-                        self.roster_asof = m.group(1)
-                        break
-            t = raw.iloc[hdr[0] + 1:].copy()
-            t.columns = [str(c).strip() for c in raw.iloc[hdr[0]]]
-            t = t[t["ISIN"].notna() & t["ISIN"].astype(str).str.match(r"^[A-Z]{2}[A-Z0-9]{9}\d$")]
+            self.roster_asof = self.roster_asof or asof
 
             def col(name):
                 return t[name] if name in t.columns else pd.Series("", index=t.index)

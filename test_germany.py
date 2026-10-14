@@ -178,6 +178,31 @@ def check_helpers() -> list[str]:
     ok(K.issuer_key("DE0005104400", "ATOSS SOFTWARE SE")
        != K.issuer_key("DE0005104806", "SYZYGY AG O.N."),
        "ATOSS and SYZYGY share an ISIN prefix but are different issuers")
+
+    # The 2026-10-01 workbook: an index summary block to the right of the
+    # company table repeats "TecDAX" and adds blank-headed columns. Reading
+    # it crashed every run from 2026-10-09.
+    from providers_de import sheet_table
+    n = np.nan
+    raw = pd.DataFrame([
+        ["Companies in Prime Standard", n, n, n, n, n, n, n, n, n, n, n, n, n],
+        ["2026-10-01 00:00:00", n, n, n, n, n, n, n, n, n, n, n, n, n],
+        ["Number of instruments:", "2", n, n, n, n, n, n, n, n, n, n, n, n],
+        ["ISIN", "Trading Symbol", "Company", "Sector", "Subsector", "Country",
+         "Instrument Exchange", "Index", "TecDAX", n, "DAX", "MDAX", "SDAX", "TecDAX"],
+        ["DE0007164600", "SAP", "SAP SE", "Software", "Software", "Germany",
+         "XETRA + FRANKFURT", "DAX", "TecDAX", n, "40", "50", "70", "30"],
+        ["DE0007664039", "VOW3", "VOLKSWAGEN AG VZO O.N.", "Automobile",
+         "Automobile Manufacturers", "Germany", "XETRA + FRANKFURT", "-", n, n, n, n, n, n],
+    ], dtype=object)
+    t, asof = sheet_table(raw)
+    ok(t is not None and list(t.columns) == ["ISIN", "Trading Symbol", "Company", "Sector",
+                                             "Subsector", "Country", "Instrument Exchange",
+                                             "Index", "TecDAX", "DAX", "MDAX", "SDAX"]
+       and len(t) == 2 and asof == "2026-10-01",
+       "Oct 2026 layout: duplicate TecDAX and blank headers dropped, company table kept")
+    ok(t is not None and t["TecDAX"].tolist()[0] == "TecDAX",
+       "the company table's own TecDAX column is the one read")
     return bad
 
 
